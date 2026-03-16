@@ -41,3 +41,14 @@ Clone the repository:
 ```bash
 git clone https://github.com/swanekamp/p4reader.git
 cd p4reader
+
+# Example
+
+```python
+from p4reader import P4Fields
+
+fld = P4Fields("flds0001.p4")
+
+print("time =", fld.time)
+print("Ez shape =", fld.Ez.shape)
+print("Jz shape =", fld.Jz.shape)
