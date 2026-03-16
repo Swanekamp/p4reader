@@ -26,24 +26,26 @@ Typical use cases include:
 
 ---
 ## Typical Workflow
-
-Chicago / LSP simulation \
-        │ \
-        ▼ \
-     .p4 files  \
-        │  \
-        ▼  \
-     p4reader \
-        │  \
-        ▼  \
-   NumPy arrays  \
-        │  \
-        ▼  \
-      simview \
-        │ \
-        ▼ \
-plots / animations / diagnostics
-
+```
+Chicago / LSP simulation
+        │
+        ▼
+     .p4 files
+  (simulation data)
+        │
+        ▼
+     p4reader
+  (data reader)
+        │
+        ▼
+   NumPy arrays
+        │
+        ▼
+     simview
+ (visualization)
+        │
+        ▼
+```
 ---
 
 # Requirements
