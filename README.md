@@ -47,6 +47,8 @@ Chicago / LSP simulation
         ▼
 plots / animations / diagnostics
 ```
+Visualization toolkit: 
+- simview → https://github.com/swanekamp/simview
 ---
 
 # Requirements
