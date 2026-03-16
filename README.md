@@ -4,7 +4,7 @@
 
 The library is designed to make it easy to load field, particle, and structure data from pulsed-power and plasma simulations and use them in Python for analysis and visualization.
 
-It is commonly used together with the **simview** visualization toolkit
+It is commonly used together with the **[simview](https://github.com/swanekamp/simview)** visualization toolkit
 but can also be used independently for data inspection and analysis.
 
 ---
@@ -45,6 +45,7 @@ Chicago / LSP simulation
  (visualization)
         │
         ▼
+plots / animations / diagnostics
 ```
 ---
 
