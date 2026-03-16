@@ -25,6 +25,26 @@ Typical use cases include:
 - post-processing simulation diagnostics
 
 ---
+## Typical Workflow
+
+Chicago / LSP simulation \
+        │ \
+        ▼ \
+     .p4 files  \
+        │  \
+        ▼  \
+     p4reader \
+        │  \
+        ▼  \
+   NumPy arrays  \
+        │  \
+        ▼  \
+      simview \
+        │ \
+        ▼ \
+plots / animations / diagnostics
+
+---
 
 # Requirements
 
