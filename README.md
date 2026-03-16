@@ -4,7 +4,8 @@
 
 The library is designed to make it easy to load field, particle, and structure data from pulsed-power and plasma simulations and use them in Python for analysis and visualization.
 
-It is primarily used together with the **simview** or other visualization tools but can also be used independently.
+It is commonly used together with the **simview** visualization toolkit
+but can also be used independently for data inspection and analysis.
 
 ---
 
@@ -16,7 +17,7 @@ It is primarily used together with the **simview** or other visualization tools 
 - Support for time-history diagnostics
 - Simple Python interface for analysis and plotting
 
-Typical uses include:
+Typical use cases include:
 
 - inspecting electromagnetic fields
 - analyzing current density distributions
@@ -41,8 +42,12 @@ Clone the repository:
 ```bash
 git clone https://github.com/swanekamp/p4reader.git
 cd p4reader
-
 ```
+Install the package and make it editable:
+```bash
+pip install -e .
+```
+
 # Example
 Example script:
 
@@ -59,4 +64,9 @@ print("Jz shape:", FLDS.Jz.shape)
 print("Ez max:", FLDS.Ez.max())
 print("rho shape:", SCLR.rho.shape)
 ```
+## Other Examples
 
+- `examples/read_fields.py` – read field and scalar data  
+- `examples/inspect_p4.py` – inspect files for available fields and scalars  
+- `examples/read_structure.py` – read structure files and create piecewise line representations of conductors  
+- `examples/simple_plot.py` – create a simple plot
