@@ -1,9 +1,0 @@
-pyproject.toml
-src/p4reader/__init__.py
-src/p4reader/p4reader.py
-src/p4reader/particles.py
-src/p4reader.egg-info/PKG-INFO
-src/p4reader.egg-info/SOURCES.txt
-src/p4reader.egg-info/dependency_links.txt
-src/p4reader.egg-info/requires.txt
-src/p4reader.egg-info/top_level.txt

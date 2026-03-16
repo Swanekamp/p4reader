@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: p4reader
-Version: 0.1.0
-Summary: Reader for Chicago P4 field, scalar, and particle dump files
-Author: Stephen Swanekamp
-Requires-Python: >=3.9
-Description-Content-Type: text/markdown
-Requires-Dist: numpy
