@@ -95,3 +95,13 @@ print("rho shape:", SCLR.rho.shape)
 - `examples/inspect_p4.py` – inspect files for available fields and scalars  
 - `examples/read_structure.py` – read structure files and create piecewise line representations of conductors  
 - `examples/simple_plot.py` – create a simple plot
+
+## Project Ecosystem
+
+These libraries are designed to work together for analyzing and visualizing
+pulsed-power and plasma simulations.
+
+| Project | Description |
+|-------|-------------|
+| **p4reader** | Read Chicago / LSP `.p4` simulation output into NumPy arrays |
+| **simview** | Visualization utilities for simulation data |
