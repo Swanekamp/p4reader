@@ -99,7 +99,9 @@ print("rho shape:", SCLR.rho.shape)
 ## Project Ecosystem
 
 These libraries are designed to work together for analyzing and visualizing
-pulsed-power and plasma simulations.
+pulsed-power and plasma simulations. They are commonly used with
+the Chicago / LSP particle-in-cell codes but can be adapted to other
+simulation frameworks.
 
 | Project | Description |
 |-------|-------------|
