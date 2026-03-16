@@ -25,6 +25,15 @@ Typical uses include:
 
 ---
 
+# Requirements
+
+p4reader has minimal dependencies.
+
+Required:
+
+- Python 3.9+
+- numpy
+
 # Installation
 
 Clone the repository:
