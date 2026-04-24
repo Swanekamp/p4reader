@@ -461,7 +461,17 @@ class P4Reader:
                 setattr(self, name + "r", full[:, :, 0])
                 setattr(self, name + "y", full[:, :, 1])
                 setattr(self, name + "z", full[:, :, 2])
+                
+    def get_unit(obj, quantity):
+        if quantity in obj.names:
+            return obj.units[obj.names.index(quantity)]
 
+        if quantity.endswith(("r", "y", "z")):
+            base = quantity[:-1]
+            if base in obj.names:
+                return obj.units[obj.names.index(base)]
+
+        raise KeyError(f"No unit found for {quantity}")
 
 class P4Particles:
     """
@@ -737,3 +747,579 @@ class P4Structure:
             bodies.append(body)
 
         return bodies
+    
+class P4Target:
+    """
+    Reader for Chicago target.p4 dump files.
+    Format (based on target*.p4 files):"""
+    def __init__(self, fname):
+        self.fname = fname
+        self._read()
+
+import struct
+import re
+from pathlib import Path
+import numpy as np
+
+
+import struct
+import re
+from pathlib import Path
+import numpy as np
+
+
+import struct
+import re
+from pathlib import Path
+import numpy as np
+
+
+class P4ParticleDiagnostic:
+    """
+    Reader for Chicago particle diagnostic dumps (diag*.p4).
+
+    Inferred layout from diag53814.p4:
+      int   type          (= 4)
+      int   dver
+      str   title         (Chicago counted string)
+      str   revision      (Chicago counted string)
+      float time
+      int   geom
+
+      Then 4 descriptor records, each containing 5 counted strings:
+          tag
+          coord_name
+          coord_unit
+          label
+          unit
+
+      Then one data block per descriptor:
+          int   npts
+          float coord[npts]
+          float values[npts]
+
+    Notes
+    -----
+    - This version is based on the current sample file structure.
+    - The descriptor count is currently hard-wired to 4.
+    """
+
+    def __init__(self, fname):
+        self.fname = str(fname)
+        self.path = Path(fname)
+        self.mode = "particle_diagnostic"
+
+        self.type = None
+        self.dver = None
+        self.title = ""
+        self.revision = ""
+        self.time = None
+        self.geom = None
+
+        self.labels = []
+        self.short_labels = []
+        self.names = []
+        self.units = []
+
+        self.coord = None
+        self.coord_name = None
+        self.coord_unit = None
+
+        self.data = {}       # sanitized_name -> 1D array
+        self.raw_data = {}   # raw label -> 1D array
+        self.meta = []       # per-trace metadata dicts
+
+        self._read()
+
+    # ==========================================================
+    # Low-level readers
+    # ==========================================================
+
+    @staticmethod
+    def _read_i32(f):
+        b = f.read(4)
+        if len(b) != 4:
+            raise EOFError("Unexpected EOF while reading int32")
+        return struct.unpack(">i", b)[0]
+
+    @staticmethod
+    def _read_f32(f):
+        b = f.read(4)
+        if len(b) != 4:
+            raise EOFError("Unexpected EOF while reading float32")
+        return struct.unpack(">f", b)[0]
+
+    @staticmethod
+    def _read_f32_array(f, n):
+        if n < 0:
+            raise ValueError(f"Negative array length: {n}")
+        b = f.read(4 * n)
+        if len(b) != 4 * n:
+            raise EOFError(f"Unexpected EOF while reading {n} float32 values")
+        return np.asarray(struct.unpack(f">{n}f", b), dtype=np.float32)
+
+    @staticmethod
+    def _read_counted_string(f, maxlen=100_000):
+        """
+        Chicago/XDR counted string format:
+            int maxlen
+            int length
+            bytes
+            pad to 4-byte boundary
+        """
+        max_declared = P4ParticleDiagnostic._read_i32(f)
+        length = P4ParticleDiagnostic._read_i32(f)
+
+        if length < 0 or length > maxlen:
+            raise ValueError(f"Unreasonable counted string length {length}")
+
+        raw = f.read(length)
+        if len(raw) != length:
+            raise EOFError("Unexpected EOF while reading counted string")
+
+        pad = (4 - (length % 4)) % 4
+        if pad:
+            f.read(pad)
+
+        return raw.decode("utf-8", errors="replace")
+
+    # ==========================================================
+    # Label helpers
+    # ==========================================================
+
+    @staticmethod
+    def _sanitize_name(label):
+        name = label.strip().lower()
+        name = name.replace("%", "pct")
+        name = name.replace("/", "_per_")
+        name = name.replace("-", "_")
+        name = name.replace("(", "_")
+        name = name.replace(")", "_")
+        name = re.sub(r"[^0-9a-zA-Z_]+", "_", name)
+        name = re.sub(r"_+", "_", name).strip("_")
+
+        if not name:
+            name = "trace"
+
+        if name[0].isdigit():
+            name = "v_" + name
+
+        return name
+
+    @staticmethod
+    def _shorten_chicago_label(label):
+        short = label.strip()
+
+        if "(" in short:
+            short = short.split("(", 1)[0].strip()
+
+        short = re.split(r"\s+at\s+", short, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        short = short.split(",", 1)[0].strip()
+
+        short = short.lower()
+        short = short.replace("%", "pct")
+        short = short.replace("/", "_per_")
+        short = short.replace("-", "_")
+        short = short.replace("(", "_").replace(")", "_")
+        short = re.sub(r"[^0-9a-zA-Z_]+", "_", short)
+        short = re.sub(r"_+", "_", short).strip("_")
+
+        return short if short else label.strip().lower()
+
+    def _make_unique_names(self, labels):
+        used = set()
+        names = []
+
+        for label in labels:
+            attr = self._sanitize_name(label)
+            base = attr
+            k = 2
+            while attr in used:
+                attr = f"{base}_{k}"
+                k += 1
+            used.add(attr)
+            names.append(attr)
+
+        return names
+
+    # ==========================================================
+    # Main read
+    # ==========================================================
+
+    def _read(self):
+        with open(self.fname, "rb") as f:
+            # ----------------------------
+            # Common header
+            # ----------------------------
+            self.type = self._read_i32(f)
+            self.dver = self._read_i32(f)
+            self.title = self._read_counted_string(f)
+            self.revision = self._read_counted_string(f)
+            self.time = self._read_f32(f)
+            self.geom = self._read_i32(f)
+
+            if self.type != 4:
+                raise ValueError(
+                    f"{self.fname} is not a particle diagnostic file "
+                    f"(type={self.type}, expected 4)"
+                )
+
+            # ----------------------------
+            # Descriptor section
+            # ----------------------------
+            descriptors = []
+
+            for j in range(4):
+                pos = f.tell()
+                try:
+                    tag = self._read_counted_string(f)
+                    coord_name = self._read_counted_string(f)
+                    coord_unit = self._read_counted_string(f)
+                    label = self._read_counted_string(f)
+                    unit = self._read_counted_string(f)
+                except Exception as e:
+                    raise ValueError(
+                        f"Failed while parsing descriptor {j} of 4 in {self.fname} "
+                        f"at byte offset {pos}"
+                    ) from e
+
+                descriptors.append(
+                    {
+                        "tag": tag,
+                        "coord_name": coord_name,
+                        "coord_unit": coord_unit,
+                        "label": label,
+                        "unit": unit,
+                    }
+                )
+
+            if not descriptors:
+                raise ValueError(f"No diagnostic descriptors found in {self.fname}")
+
+            self.meta = descriptors
+
+            # ----------------------------
+            # Data section
+            # ----------------------------
+            self.labels = [d["label"] for d in descriptors]
+            self.units = [d["unit"] for d in descriptors]
+            self.short_labels = [self._shorten_chicago_label(lbl) for lbl in self.labels]
+            self.names = self._make_unique_names(self.labels)
+
+            common_coord = None
+            self.coord_name = descriptors[0]["coord_name"]
+            self.coord_unit = descriptors[0]["coord_unit"]
+
+            for j, d in enumerate(descriptors):
+                npts = self._read_i32(f)
+                x = self._read_f32_array(f, npts)
+                y = self._read_f32_array(f, npts)
+
+                if common_coord is None:
+                    common_coord = x
+                else:
+                    if len(x) != len(common_coord) or not np.allclose(x, common_coord):
+                        d["coord_mismatch"] = True
+
+                raw_label = d["label"]
+                clean_name = self.names[j]
+
+                self.raw_data[raw_label] = y
+                self.data[clean_name] = y
+
+                setattr(self, clean_name, y)
+
+            self.coord = common_coord
+
+            if self.coord_name:
+                coord_attr = self._sanitize_name(self.coord_name)
+                setattr(self, coord_attr, self.coord)
+
+    # ==========================================================
+    # Convenience API
+    # ==========================================================
+
+    def __len__(self):
+        return 0 if self.coord is None else len(self.coord)
+
+    def keys(self):
+        return list(self.names)
+
+    def raw_labels(self):
+        return list(self.labels)
+
+    def _col_index(self, key):
+        if isinstance(key, int):
+            return key
+        if key in self.names:
+            return self.names.index(key)
+        if key in self.labels:
+            return self.labels.index(key)
+        if key in self.short_labels:
+            matches = [j for j, s in enumerate(self.short_labels) if s == key]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise KeyError(f"Short label '{key}' is ambiguous; matches columns {matches}")
+        raise KeyError(key)
+
+    def __getitem__(self, key):
+        j = self._col_index(key)
+        return self.data[self.names[j]]
+
+    def get_unit(self, key):
+        j = self._col_index(key)
+        return self.units[j]
+
+    def get_label(self, key):
+        j = self._col_index(key)
+        return self.labels[j]
+
+    def get_short_label(self, key):
+        j = self._col_index(key)
+        return self.short_labels[j]
+
+    def find(self, text):
+        text = text.lower()
+        return [
+            (j, self.names[j], self.short_labels[j], self.labels[j], self.units[j])
+            for j in range(len(self.names))
+            if text in self.names[j].lower()
+            or text in self.labels[j].lower()
+            or text in self.short_labels[j].lower()
+        ]
+
+    def summary(self):
+        lines = [
+            f"P4ParticleDiagnostic('{self.fname}')",
+            f"  type        = {self.type}",
+            f"  dver        = {self.dver}",
+            f"  time        = {self.time}",
+            f"  geom        = {self.geom}",
+            f"  coord       = {self.coord_name} ({self.coord_unit})",
+            f"  ntraces     = {len(self.names)}",
+            f"  npoints     = {len(self)}",
+            "  traces:"
+        ]
+        for j, (name, label, unit) in enumerate(zip(self.names, self.labels, self.units)):
+            lines.append(f"    [{j:02d}] {name}    ({unit})")
+            lines.append(f"         {label}")
+        return "\n".join(lines)
+    
+import struct
+import re
+from pathlib import Path
+import numpy as np
+
+
+class P4ParticleTarget:
+    """
+    Reader for Chicago particle target dumps (targ*.p4).
+
+    Inferred layout from targ53814.p4:
+      int   type      (=5)
+      int   dver
+      str   title
+      str   revision
+      float time
+      int   geom
+
+      int   nquant
+      str   names[nquant]
+      str   units[nquant]
+
+      int   target_id_or_count
+
+      str   x_name
+      str   x_unit
+      str   y_name
+      str   y_unit
+
+      int   nx
+      float x[nx]
+
+      int   ny
+      float y[ny]
+
+      float field[nquant][ny,nx]
+    """
+
+    def __init__(self, fname):
+        self.fname = str(fname)
+        self.path = Path(fname)
+        self.mode = "particle_target"
+
+        self.fields = {}
+        self.units = {}
+        self.names = []
+
+        self._read()
+
+    # ----------------------------
+    # Low-level readers
+    # ----------------------------
+
+    @staticmethod
+    def _read_i32(f):
+        b = f.read(4)
+        if len(b) != 4:
+            raise EOFError("Unexpected EOF while reading int32")
+        return struct.unpack(">i", b)[0]
+
+    @staticmethod
+    def _read_f32(f):
+        b = f.read(4)
+        if len(b) != 4:
+            raise EOFError("Unexpected EOF while reading float32")
+        return struct.unpack(">f", b)[0]
+
+    @staticmethod
+    def _read_f32_array(f, n):
+        if n < 0:
+            raise ValueError(f"Negative array length: {n}")
+        b = f.read(4 * n)
+        if len(b) != 4 * n:
+            raise EOFError(f"Unexpected EOF while reading {n} float32 values")
+        return np.asarray(struct.unpack(f">{n}f", b), dtype=np.float32)
+
+    @staticmethod
+    def _read_string(f, maxlen=100_000):
+        max_declared = P4ParticleTarget._read_i32(f)
+        length = P4ParticleTarget._read_i32(f)
+
+        if length < 0 or length > maxlen:
+            raise ValueError(f"Unreasonable counted string length {length}")
+
+        raw = f.read(length)
+        if len(raw) != length:
+            raise EOFError("Unexpected EOF while reading counted string")
+
+        pad = (4 - (length % 4)) % 4
+        if pad:
+            f.read(pad)
+
+        return raw.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _sanitize_name(label):
+        name = label.strip().lower()
+        name = name.replace("%", "pct")
+        name = name.replace("/", "_per_")
+        name = name.replace("-", "_")
+        name = name.replace("(", "_").replace(")", "_")
+        name = re.sub(r"[^0-9a-zA-Z_]+", "_", name)
+        name = re.sub(r"_+", "_", name).strip("_")
+        if not name:
+            name = "field"
+        if name[0].isdigit():
+            name = "v_" + name
+        return name
+
+    # ----------------------------
+    # Main reader
+    # ----------------------------
+
+    def _read(self):
+        with open(self.fname, "rb") as f:
+            self.type = self._read_i32(f)
+            self.dver = self._read_i32(f)
+            self.title = self._read_string(f)
+            self.revision = self._read_string(f)
+            self.time = self._read_f32(f)
+            self.geom = self._read_i32(f)
+
+            if self.type != 5:
+                raise ValueError(
+                    f"{self.fname} is not a particle target file "
+                    f"(type={self.type}, expected 5)"
+                )
+
+            self.nquant = self._read_i32(f)
+
+            raw_names = [self._read_string(f) for _ in range(self.nquant)]
+            raw_units = [self._read_string(f) for _ in range(self.nquant)]
+
+            self.raw_names = raw_names
+            self.names = [self._sanitize_name(n) for n in raw_names]
+            self.raw_units = raw_units
+
+            # Target/grid metadata
+            self.target_id = self._read_i32(f)
+
+            self.x_name = self._read_string(f)
+            self.x_unit = self._read_string(f)
+
+            self.y_name = self._read_string(f)
+            self.y_unit = self._read_string(f)
+
+            self.nx = self._read_i32(f)
+            self.x = self._read_f32_array(f, self.nx)
+
+            self.ny = self._read_i32(f)
+            self.y = self._read_f32_array(f, self.ny)
+
+            # Field arrays
+            for raw_name, name, unit in zip(self.raw_names, self.names, self.raw_units):
+                arr = self._read_f32_array(f, self.nx * self.ny)
+                arr = arr.reshape((self.ny, self.nx))
+
+                self.fields[name] = arr
+                self.units[name] = unit
+
+                # also expose as attribute
+                setattr(self, name, arr)
+
+            # Convenience aliases for radial targets
+            if self.x_name.strip().lower() in ("r", "radius"):
+                self.r = self.x
+            if self.y_name.strip().lower() in ("theta", "th"):
+                self.theta = self.y
+
+    # ----------------------------
+    # Convenience API
+    # ----------------------------
+
+    def keys(self):
+        return list(self.names)
+
+    def raw_labels(self):
+        return list(self.raw_names)
+
+    def __getitem__(self, key):
+        if key in self.fields:
+            return self.fields[key]
+
+        if key in self.raw_names:
+            idx = self.raw_names.index(key)
+            return self.fields[self.names[idx]]
+
+        raise KeyError(key)
+
+    def get_unit(self, key):
+        if key in self.units:
+            return self.units[key]
+
+        if key in self.raw_names:
+            idx = self.raw_names.index(key)
+            return self.raw_units[idx]
+
+        raise KeyError(key)
+
+    def summary(self):
+        lines = [
+            f"P4ParticleTarget('{self.fname}')",
+            f"  type       = {self.type}",
+            f"  dver       = {self.dver}",
+            f"  time       = {self.time}",
+            f"  geom       = {self.geom}",
+            f"  target_id  = {self.target_id}",
+            f"  x          = {self.x_name} ({self.x_unit}), nx={self.nx}",
+            f"  y          = {self.y_name} ({self.y_unit}), ny={self.ny}",
+            f"  nquant     = {self.nquant}",
+            "  fields:",
+        ]
+
+        for raw, name, unit in zip(self.raw_names, self.names, self.raw_units):
+            lines.append(f"    {name:12s} ({unit})   raw='{raw}'")
+
+        return "\n".join(lines)
