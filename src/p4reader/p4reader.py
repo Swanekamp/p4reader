@@ -406,20 +406,26 @@ class P4Reader:
     # Assemble global arrays
     # ==========================================================
     def _assemble_global(self):
+        """
+        Assemble MPI/domain blocks into global arrays.
 
-        # Determine global size
-        max_r = 0
-        max_z = 0
+        This version uses the physical x/z coordinates to place blocks,
+        rather than trusting iR/kR offsets. That is important for
+        multi-region Chicago runs, where kR may restart in each z-region.
+        """
 
-        for b in self.blocks:
-            max_r = max(max_r, b["iR"] + b["nI"])
-            max_z = max(max_z, b["kR"] + b["nK"])
+        # Build global coordinate arrays from all blocks
+        r_round = 12
+        z_round = 12
 
-        self.nr = max_r
-        self.nz = max_z
+        all_r = np.concatenate([np.round(b["x"], r_round) for b in self.blocks])
+        all_z = np.concatenate([np.round(b["z"], z_round) for b in self.blocks])
 
-        self.r = np.zeros(self.nr)
-        self.z = np.zeros(self.nz)
+        self.r = np.unique(all_r)
+        self.z = np.unique(all_z)
+
+        self.nr = len(self.r)
+        self.nz = len(self.z)
 
         if self.mode == "vector":
             global_data = {
@@ -432,25 +438,23 @@ class P4Reader:
                 for name in self.names
             }
 
+        # Assemble by coordinate matching
         for b in self.blocks:
 
-            i0 = b["iR"]
-            i1 = i0 + b["nI"]
+            bx = np.round(b["x"], r_round)
+            bz = np.round(b["z"], z_round)
 
-            k0 = b["kR"]
-            k1 = k0 + b["nK"]
-
-            self.r[i0:i1] = b["x"]
-            self.z[k0:k1] = b["z"]
+            ir = np.searchsorted(self.r, bx)
+            iz = np.searchsorted(self.z, bz)
 
             for name in self.names:
 
                 if self.mode == "vector":
                     local = b[name].reshape((b["nK"], b["nI"], 3))
-                    global_data[name][k0:k1, i0:i1, :] = local
+                    global_data[name][np.ix_(iz, ir)] = local
                 else:
                     local = b[name].reshape((b["nK"], b["nI"]))
-                    global_data[name][k0:k1, i0:i1] = local
+                    global_data[name][np.ix_(iz, ir)] = local
 
         # Attach to object
         for name in self.names:
@@ -1112,36 +1116,26 @@ from pathlib import Path
 import numpy as np
 
 
+class P4TargetRecord:
+    def __init__(self):
+        self.fields = {}
+        self.units = {}
+        self.names = []
+
+    def keys(self):
+        return list(self.names)
+
+    def __getitem__(self, key):
+        if key in self.fields:
+            return self.fields[key]
+        raise KeyError(key)
+
+
 class P4ParticleTarget:
     """
     Reader for Chicago particle target dumps (targ*.p4).
 
-    Inferred layout from targ53814.p4:
-      int   type      (=5)
-      int   dver
-      str   title
-      str   revision
-      float time
-      int   geom
-
-      int   nquant
-      str   names[nquant]
-      str   units[nquant]
-
-      int   target_id_or_count
-
-      str   x_name
-      str   x_unit
-      str   y_name
-      str   y_unit
-
-      int   nx
-      float x[nx]
-
-      int   ny
-      float y[ny]
-
-      float field[nquant][ny,nx]
+    Supports files containing multiple target records.
     """
 
     def __init__(self, fname):
@@ -1151,7 +1145,7 @@ class P4ParticleTarget:
 
         self.fields = {}
         self.units = {}
-        self.names = []
+        self.targets = []
 
         self._read()
 
@@ -1209,10 +1203,13 @@ class P4ParticleTarget:
         name = name.replace("(", "_").replace(")", "_")
         name = re.sub(r"[^0-9a-zA-Z_]+", "_", name)
         name = re.sub(r"_+", "_", name).strip("_")
+
         if not name:
             name = "field"
+
         if name[0].isdigit():
             name = "v_" + name
+
         return name
 
     # ----------------------------
@@ -1236,44 +1233,105 @@ class P4ParticleTarget:
 
             self.nquant = self._read_i32(f)
 
-            raw_names = [self._read_string(f) for _ in range(self.nquant)]
-            raw_units = [self._read_string(f) for _ in range(self.nquant)]
+            self.raw_names = [
+                self._read_string(f) for _ in range(self.nquant)
+            ]
 
-            self.raw_names = raw_names
-            self.names = [self._sanitize_name(n) for n in raw_names]
-            self.raw_units = raw_units
+            self.raw_units = [
+                self._read_string(f) for _ in range(self.nquant)
+            ]
 
-            # Target/grid metadata
-            self.target_id = self._read_i32(f)
+            self.names = [
+                self._sanitize_name(name) for name in self.raw_names
+            ]
 
-            self.x_name = self._read_string(f)
-            self.x_unit = self._read_string(f)
+            # ----------------------------
+            # Read all target records
+            # ----------------------------
 
-            self.y_name = self._read_string(f)
-            self.y_unit = self._read_string(f)
+            self.targets = []
 
-            self.nx = self._read_i32(f)
-            self.x = self._read_f32_array(f, self.nx)
+            while True:
+                pos = f.tell()
+                f.seek(0, 2)
+                end = f.tell()
+                f.seek(pos)
 
-            self.ny = self._read_i32(f)
-            self.y = self._read_f32_array(f, self.ny)
+                if pos >= end:
+                    break
 
-            # Field arrays
-            for raw_name, name, unit in zip(self.raw_names, self.names, self.raw_units):
-                arr = self._read_f32_array(f, self.nx * self.ny)
-                arr = arr.reshape((self.ny, self.nx))
+                rec = P4TargetRecord()
 
-                self.fields[name] = arr
-                self.units[name] = unit
+                rec.target_id = self._read_i32(f)
 
-                # also expose as attribute
-                setattr(self, name, arr)
+                rec.x_name = self._read_string(f)
+                rec.x_unit = self._read_string(f)
 
-            # Convenience aliases for radial targets
-            if self.x_name.strip().lower() in ("r", "radius"):
-                self.r = self.x
-            if self.y_name.strip().lower() in ("theta", "th"):
-                self.theta = self.y
+                rec.y_name = self._read_string(f)
+                rec.y_unit = self._read_string(f)
+
+                rec.nx = self._read_i32(f)
+                rec.x = self._read_f32_array(f, rec.nx)
+
+                rec.ny = self._read_i32(f)
+                rec.y = self._read_f32_array(f, rec.ny)
+
+                rec.raw_names = list(self.raw_names)
+                rec.names = list(self.names)
+                rec.raw_units = list(self.raw_units)
+
+                for raw_name, name, unit in zip(
+                    self.raw_names, self.names, self.raw_units
+                ):
+                    arr = self._read_f32_array(f, rec.nx * rec.ny)
+                    arr = arr.reshape((rec.ny, rec.nx))
+
+                    rec.fields[name] = arr
+                    rec.units[name] = unit
+                    setattr(rec, name, arr)
+
+                if rec.x_name.strip().lower() in ("r", "radius"):
+                    rec.r = rec.x
+
+                if rec.y_name.strip().lower() in ("theta", "th"):
+                    rec.theta = rec.y
+
+                self.targets.append(rec)
+
+            self.ntargets = len(self.targets)
+
+            if self.ntargets == 0:
+                raise ValueError(f"No targets found in {self.fname}")
+
+            # ----------------------------
+            # Backward-compatible aliases:
+            # expose first target at top level
+            # ----------------------------
+
+            first = self.targets[0]
+
+            self.target_id = first.target_id
+            self.x_name = first.x_name
+            self.x_unit = first.x_unit
+            self.y_name = first.y_name
+            self.y_unit = first.y_unit
+
+            self.nx = first.nx
+            self.ny = first.ny
+            self.x = first.x
+            self.y = first.y
+
+            self.fields = first.fields
+            self.units = first.units
+
+            for name in self.names:
+                setattr(self, name, first.fields[name])
+
+            if hasattr(first, "r"):
+                self.r = first.r
+
+            if hasattr(first, "theta"):
+                self.theta = first.theta
 
     # ----------------------------
     # Convenience API
@@ -1305,6 +1363,12 @@ class P4ParticleTarget:
 
         raise KeyError(key)
 
+    def get_target(self, target_id):
+        for rec in self.targets:
+            if rec.target_id == target_id:
+                return rec
+        raise KeyError(f"No target with target_id={target_id}")
+
     def summary(self):
         lines = [
             f"P4ParticleTarget('{self.fname}')",
@@ -1312,14 +1376,28 @@ class P4ParticleTarget:
             f"  dver       = {self.dver}",
             f"  time       = {self.time}",
             f"  geom       = {self.geom}",
-            f"  target_id  = {self.target_id}",
-            f"  x          = {self.x_name} ({self.x_unit}), nx={self.nx}",
-            f"  y          = {self.y_name} ({self.y_unit}), ny={self.ny}",
+            f"  ntargets   = {self.ntargets}",
             f"  nquant     = {self.nquant}",
             "  fields:",
         ]
 
         for raw, name, unit in zip(self.raw_names, self.names, self.raw_units):
             lines.append(f"    {name:12s} ({unit})   raw='{raw}'")
+
+        lines.append("  targets:")
+        for i, rec in enumerate(self.targets):
+            # Optional: include a quick diagnostic value
+            try:
+                emax = np.max(rec.energy)
+                e_str = f", maxE={emax:.3g} J/cm^2"
+            except Exception:
+                e_str = ""
+
+            lines.append(
+                f"    [{i}] target_id={rec.target_id}: "
+                f"{rec.x_name} ({rec.x_unit}) nx={rec.nx}, "
+                f"{rec.y_name} ({rec.y_unit}) ny={rec.ny}"
+                f"{e_str}"
+            )
 
         return "\n".join(lines)
