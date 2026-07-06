@@ -579,10 +579,24 @@ class P4Particles:
 class P4Structure:
     """
     Reader for Chicago struct.p4 structural boundary dumps.
+
+    Parameters
+    ----------
+    fname : str or Path
+        Path to the struct.p4 file.
+    dim : {None, 1, 2}, optional
+        Force the file to be interpreted as a 1D or 2D structure dump.
+        ``None`` (default) trusts the ``dimen`` field in the file header,
+        falling back to 1D if no segments are present. Pass ``dim=1`` for
+        1D Cartesian runs (no r-z boundary segments) or ``dim=2`` for
+        axisymmetric / 2D Cartesian runs.
     """
 
-    def __init__(self, fname):
+    def __init__(self, fname, dim=None):
+        if dim not in (None, 1, 2):
+            raise ValueError(f"dim must be None, 1, or 2 (got {dim!r})")
         self.fname = fname
+        self._force_dim = dim
         self._read()
 
     # --------------------------
@@ -649,7 +663,33 @@ class P4Structure:
                     (nty, mty, nid, mid, xa, ya, za, xb, yb, zb)
                 )
 
-        segments = np.array(segments)
+        # Resolve dimensionality: explicit override wins, else the file
+        # header, else infer from whether any segments were read.
+        if self._force_dim is not None:
+            self.dim = self._force_dim
+        elif self.dimen in (1, 2):
+            self.dim = self.dimen
+        else:
+            self.dim = 2 if segments else 1
+
+        if self.dim == 1:
+            # 1D Cartesian runs have no r-z boundary segments.
+            empty_i = np.array([], dtype=int)
+            empty_f = np.array([], dtype=float)
+            self.nty = empty_i
+            self.mty = empty_i
+            self.nid = empty_i
+            self.mid = empty_i
+            self.xa = empty_f
+            self.ya = empty_f
+            self.za = empty_f
+            self.xb = empty_f
+            self.yb = empty_f
+            self.zb = empty_f
+            return
+
+        # 2D path — reshape guards against the (0, 10) edge case.
+        segments = np.array(segments, dtype=float).reshape(-1, 10)
 
         self.nty = segments[:, 0].astype(int)
         self.mty = segments[:, 1].astype(int)
